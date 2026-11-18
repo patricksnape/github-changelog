@@ -1,27 +1,37 @@
 # github-changelog
 
-This is a small utility that generates a changelog between two git tags based on GitHub pull request titles as either plaintext or markdown.
+This is a small utility that generates a changelog between two git tags from the GitHub pull requests that were merged in that range, as a ReStructuredText bullet list (ready to paste into a Sphinx `changelog.rst`).
 
-An example might look like:
+An example of the output:
 
-- Improve test coverage for mygreatpackage.subpackage [#1234]()
-- Add support for Python 3 [#1233]()
+```rst
+- `#1234`_ Improve test coverage for mygreatpackage.subpackage (@octocat)
+- `#1233`_ Add support for Python 3 (@octocat)
+.. _#1234: https://github.com/owner/repo/pull/1234
+.. _#1233: https://github.com/owner/repo/pull/1233
+```
 
 ## Installing
 
 ```
-pip install github-changelog
+pip install git+https://github.com/patricksnape/github-changelog
 ```
+
+(or `uvx --from git+https://github.com/patricksnape/github-changelog changelog ...` to run it without installing).
 
 ## Using
 
 ```
-changelog [-h] [-m] OWNER REPO [PREVIOUS] [CURRENT]
+changelog [-h] [-s] [--github-token TOKEN] OWNER REPO [PREVIOUS] [CURRENT]
 ```
 
-The `changelog` command takes a GitHub repository owner (user or organization), repository name and zero, one, or two tags to limit the set of changes to consider. If no tags are provided, the changelog will be computed between the latest tag and `HEAD`. One tag may be provided to set the base tag to compare against `HEAD`. Two tags may be provided to specify both base tag and ending tag. The generated changelog will list all GitHub pull requests that have been merged between the specified or inferred tags. If `-m` is specified the output will be formatted in markdown and include links to the pull requests.
+The `changelog` command takes a GitHub repository owner (user or organization), repository name and zero, one, or two tags to limit the set of changes to consider. If no tags are provided, the changelog will be computed between the latest tag and the head of the repository's default branch. One tag may be provided to set the base tag to compare against the head of the default branch. Two tags may be provided to specify both base tag and ending tag.
 
-Pull request merges are identified by their commit message, usually taking the form of `Merge pull request #123…`. Squash-and-merged pull requests are identified by having the PR number in parentheses at the end of first line of the commit message.
+A GitHub token is required (`--github-token`, or the `GITHUB_API_TOKEN` environment variable; for example `GITHUB_API_TOKEN=$(gh auth token) changelog ...`).
+
+### How the pull requests are found
+
+The commits between the two tags are listed (all pages), and each commit is asked which pull requests it belongs to. This does not depend on how the pull requests were merged (merge commit, squash or rebase) or on commit message conventions, and does not use dates, so a pull request merged right before a tag is not lost. Only merged pull requests are listed, each once, sorted by number.
 
 ### Examples
 
@@ -29,19 +39,19 @@ Pull request merges are identified by their commit message, usually taking the f
 changelog cfpb github-changelog
 ```
 
-Will generate a text changelog between the latest tag and `HEAD`.
+Will generate a changelog between the latest tag and the head of the default branch.
 
 ```
 changelog cfpb github-changelog 1.0.0
 ```
 
-Will generate a text changelog between `1.0.0` and `HEAD`.
+Will generate a changelog between `1.0.0` and the head of the default branch.
 
 ```
-changelog -m cfpb github-changelog 1.0.0 1.0.1
+changelog cfpb github-changelog 1.0.0 1.0.1
 ```
 
-Will generate a markdown changelog between `1.0.0` and `1.0.1`.
+Will generate a changelog between `1.0.0` and `1.0.1`.
 
 ## GitHub Enterprise Support
 
