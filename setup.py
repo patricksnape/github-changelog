@@ -15,14 +15,14 @@ setup(
     long_description=long_description,
     long_description_content_type='text/markdown',
     include_package_data=True,
+    python_requires='>=3.7',
     packages=find_packages(),
     install_requires=[
         'requests>=2.13',
     ],
     extras_require={
         'testing': [
-            'mock>=2.0.0',
-            'coverage>=3.7.0',
+            'pytest',
             'flake8>=2.2.0',
         ],
     },

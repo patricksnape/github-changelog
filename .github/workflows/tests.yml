@@ -1,0 +1,19 @@
+name: Tests
+on:
+  push: { branches: [master] }
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.14"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: pip install ".[testing]"
+      - run: flake8 --max-line-length=120 changelog
+      - run: pytest changelog -q
