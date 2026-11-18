@@ -2,9 +2,15 @@
 """
 This is a script to determine which PRs have been merges since the last
 release, or between two releases on the same branch.
+
+The pull requests are found from the commits between the two tags (each commit
+is asked which pull requests it belongs to), not from dates, so that merge
+commits, squash merges and rebase merges all work and no PR near the edges of
+the range is lost.
 """
 import argparse
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from operator import attrgetter
@@ -23,10 +29,6 @@ class Authorization:
     @property
     def token_auth(self) -> Dict[str, str]:
         return {"Authorization": f"token {self.token}"}
-
-    @property
-    def bearer_auth(self) -> Dict[str, str]:
-        return {"Authorization": f"Bearer {self.token}"}
 
 
 @dataclass(frozen=True)
@@ -49,7 +51,10 @@ class Commit:
             sha=commit_json["sha"],
             datetime=parse_datetime_string(datetime_str),
             message=commit_json["commit"]["message"],
-            author=commit_json["author"]["login"],
+            # "author" is null when the commit author's email is not linked to a
+            # GitHub account (e.g. old commits), so fall back to the git name
+            author=(commit_json.get("author") or {}).get("login")
+            or commit_json["commit"]["author"]["name"],
         )
 
 
@@ -93,19 +98,6 @@ class GithubAPI:
     def compare_commits_url(self, first_commit: Commit, last_commit: Commit) -> str:
         return f"{self.repo_url}/compare/{first_commit.sha}...{last_commit.sha}"
 
-    def graphql_query(self, query: str) -> Dict[str, Any]:
-        request = requests.post(
-            f"{self.config.api_url}/graphql",
-            json={"query": query},
-            headers=self.config.authorization.bearer_auth,
-        )
-        if request.status_code == 200:
-            return request.json()
-        else:
-            raise GitHubError(
-                f"Query failed to run by returning code of {request.status_code}\n\n{query}"
-            )
-
     def api_query(self, url: str, params: Optional[Dict[str, str]] = None) -> Any:
         request = requests.get(
             url, params=params, headers=self.config.authorization.token_auth
@@ -131,8 +123,14 @@ class GithubAPI:
         commit_json = self.api_query(self.get_commit_url(tag_json["object"]["sha"]))
         return Tag(name, Commit.init_from_api(commit_json))
 
-    def get_last_commit(self, branch: str = "master") -> Commit:
-        """ Get the last commit sha for the given repo and branch """
+    def get_default_branch(self) -> str:
+        """ Get the name of the default branch of the repo """
+        return self.api_query(self.repo_url)["default_branch"]
+
+    def get_last_commit(self, branch: Optional[str] = None) -> Commit:
+        """ Get the last commit sha for the given repo and branch (default: the default branch) """
+        if branch is None:
+            branch = self.get_default_branch()
         commits_json: List[Dict[str, Any]] = self.api_query(
             self.commits_url, params={"sha": branch}
         )
@@ -148,50 +146,51 @@ class GithubAPI:
     def get_commits_between(
         self, first_commit: Commit, last_commit: Commit
     ) -> List[Commit]:
-        """ Get a list of commits between two commits """
-        commits_json = self.api_query(
-            self.compare_commits_url(first_commit, last_commit)
-        )
-
-        if "commits" not in commits_json:
-            raise GitHubError(
-                f"Commits not found between {first_commit} and {last_commit}."
+        """ Get a list of commits between two commits (all pages) """
+        per_page = 100
+        commits = []
+        page = 1
+        while True:
+            commits_json = self.api_query(
+                self.compare_commits_url(first_commit, last_commit),
+                params={"per_page": str(per_page), "page": str(page)},
             )
+            if "commits" not in commits_json:
+                raise GitHubError(
+                    f"Commits not found between {first_commit} and {last_commit}."
+                )
+            commits.extend(Commit.init_from_api(c) for c in commits_json["commits"])
+            if len(commits_json["commits"]) < per_page:
+                return commits
+            page += 1
 
-        return [Commit.init_from_api(c) for c in commits_json["commits"]]
+    def get_merged_prs_for_commit(self, sha: str) -> List[PullRequest]:
+        """ Get the merged pull requests that a commit belongs to """
+        prs_json = self.api_query(
+            f"{self.get_commit_url(sha)}/pulls", params={"per_page": "100"}
+        )
+        return [
+            PullRequest(
+                number=pr["number"],
+                title=pr["title"],
+                # the user is null for deleted accounts
+                author=(pr.get("user") or {}).get("login", "ghost"),
+            )
+            for pr in prs_json
+            if pr.get("merged_at") is not None
+        ]
 
     def get_prs_merged_between_commits(
         self, first_commit: Commit, last_commit: Commit
     ) -> List[PullRequest]:
-        from_date = first_commit.datetime.isoformat()
-        to_date = last_commit.datetime.isoformat()
-        merged_query = f"repo:{self.owner}/{self.repo} is:pr is:merged created:{from_date}..{to_date}"
-        graphql_search = (
-            """
-            {
-              search(first: 100, query: "%s", type: ISSUE) {
-                nodes {
-                  ... on PullRequest {
-                    title
-                    number
-                    author { login }
-                  }
-                }
-              }
-            }
-            """
-            % merged_query
-        )
-        pr_json_list = self.graphql_query(graphql_search)
-        return sorted(
-            [
-                PullRequest(
-                    number=pr["number"], title=pr["title"], author=pr["author"]["login"]
-                )
-                for pr in pr_json_list["data"]["search"].get("nodes", [])
-            ],
-            key=attrgetter("number"),
-        )
+        """ Get the merged pull requests of all commits after first_commit up to last_commit """
+        commits = self.get_commits_between(first_commit, last_commit)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            per_commit = list(
+                pool.map(lambda c: self.get_merged_prs_for_commit(c.sha), commits)
+            )
+        prs = {pr.number: pr for prs in per_commit for pr in prs}
+        return sorted(prs.values(), key=attrgetter("number"))
 
 
 class GitHubError(Exception):
@@ -206,7 +205,7 @@ def fetch_changes(
     github_api: GithubAPI,
     previous_tag_name: Optional[str] = None,
     current_tag_name: Optional[str] = None,
-    branch: str = "master",
+    branch: Optional[str] = None,
 ):
     if previous_tag_name is None:
         previous_tag_name = github_api.get_latest_tag()
